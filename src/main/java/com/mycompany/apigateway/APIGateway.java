@@ -13,9 +13,12 @@ import java.util.concurrent.Executors;
 public class APIGateway {
 
     private static final int DEFAULT_PORT = 8080;
-    private static int authServicePort;
-    private static int productServicePort;
-    private static int purchaseServicePort;
+    static int authServicePort = 33795;
+    static String authServiceHost = "mbfdp-41-43-85-85.run.pinggy-free.link";
+    static int productServicePort = 8082;
+    static String productServiceHost = "bore.pub";
+    static int purchaseServicePort = 8083;
+    static String purchaseServiceHost = "localhost";
 
     public static void main(String[] args) {
         Scanner scanner = new Scanner(System.in);
@@ -35,13 +38,19 @@ public class APIGateway {
 
         System.out.println("Enter port number for Authentication Service: ");
         authServicePort = Integer.parseInt(scanner.nextLine());
+        System.out.println("Enter host name for Authentication Service: ");
+        authServiceHost = scanner.nextLine();
 
         System.out.println("Enter port number for Product Service: ");
         productServicePort = Integer.parseInt(scanner.nextLine());
+        System.out.println("Enter host name for Product Service: ");
+        productServiceHost = scanner.nextLine();
 
         System.out.println("Enter Port number for Purchase Service: ");
         purchaseServicePort = Integer.parseInt(scanner.nextLine());
-        
+        System.out.println("Enter host name for Purchase Service: ");
+        purchaseServiceHost = scanner.nextLine();
+
         //thread pool for serving more than one client at the same time
         ExecutorService threadPool = Executors.newCachedThreadPool();
 
@@ -50,7 +59,7 @@ public class APIGateway {
             
             while (true) {
                 Socket clientSocket = serverSocket.accept();
-                threadPool.execute(new ClientHandler(clientSocket, authServicePort, productServicePort, purchaseServicePort));
+                threadPool.execute(new ClientHandler(clientSocket));
             }
         } 
         catch (IOException e) {
@@ -64,15 +73,12 @@ public class APIGateway {
 }
 
 class ClientHandler implements Runnable {
-    private Socket clientSocket;
-    private int authPort, productPort, purchasePort;
+    private final Socket clientSocket;
 
-    public ClientHandler(Socket socket, int auth, int prod, int purchase) {
-        clientSocket = socket;
-        authPort = auth;
-        productPort = prod;
-        purchasePort = purchase;
+    public ClientHandler(Socket clientSocket) {
+        this.clientSocket = clientSocket;
     }
+
     @Override
     public void run() {
         try (BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
@@ -81,49 +87,104 @@ class ClientHandler implements Runnable {
             String requestLine = in.readLine();
             if (requestLine == null || requestLine.isEmpty()) return;
 
-            //determing the port
+            // Determining the port
             int targetPort = -1;
-            if (requestLine.contains("/api/authentication")) {
-                targetPort = authPort;
-            } 
+            String targetHost = null;
+            if (requestLine.contains("/api/auth")) {
+                targetPort = APIGateway.authServicePort;
+                targetHost = APIGateway.authServiceHost;
+            }
             else if (requestLine.contains("/api/products")) {
-                targetPort = productPort;
-            } 
+                targetPort = APIGateway.productServicePort;
+                targetHost = APIGateway.productServiceHost;
+            }
             else if (requestLine.contains("/api/purchases")) {
-                targetPort = purchasePort;
+                targetPort = APIGateway.purchaseServicePort;
+                targetHost = APIGateway.purchaseServiceHost;
             }
 
             if (targetPort != -1) {
-                forwardRequest(targetPort, requestLine, out);
-            } 
-            else {
-                out.println("HTTP/1.1 404 Not Found\r\n\r\nThe requested API route is not recognized by gateway");
+                forwardRequest(targetHost, targetPort, requestLine, in, out);
             }
-        } 
+            else {
+                out.print("HTTP/1.1 404 Not Found\r\n\r\nThe requested API route is not recognized by gateway");
+                out.flush();
+            }
+        }
         catch (IOException e) {
             System.out.println("Error: " + e.getMessage());
-        } 
+        }
         finally {
-            try { clientSocket.close(); } catch (IOException e) { e.printStackTrace(); }
+            try { clientSocket.close(); } catch (IOException e) {
+                System.out.println("Error closing client socket: " + e.getMessage());
+            }
         }
     }
 
-    //client communicating with other servers
-    private void forwardRequest(int port, String request, PrintWriter clientOut) {
-        try (Socket serviceSocket = new Socket("bore.pub", port);
+    // Client communicating with other servers
+    private void forwardRequest(String hostname, int port, String requestLine, BufferedReader clientIn, PrintWriter clientOut) {
+        try (Socket serviceSocket = new Socket(hostname, port);
              PrintWriter serviceOut = new PrintWriter(serviceSocket.getOutputStream(), true);
              BufferedReader serviceIn = new BufferedReader(new InputStreamReader(serviceSocket.getInputStream()))) {
 
-            //forwarding
-            serviceOut.println(request);
-            //passing back the response
-            String response;
-            while ((response = serviceIn.readLine()) != null) {
-                clientOut.println("Service Response: " + response);
+            serviceOut.print(requestLine + "\r\n");
+
+            String line;
+            int contentLength = 0;
+
+            // Read headers
+            while ((line = clientIn.readLine()) != null && !line.isEmpty()) {
+                serviceOut.print(line + "\r\n");
+                if (line.toLowerCase().startsWith("content-length:")) {
+                    contentLength = Integer.parseInt(line.split(":")[1].trim());
+                }
             }
+            serviceOut.print("\r\n");
+            serviceOut.flush();
+
+            // Read body
+            if (contentLength > 0) {
+                char[] bodyChars = new char[contentLength];
+                clientIn.read(bodyChars, 0, contentLength);
+                serviceOut.print(bodyChars);
+                serviceOut.flush();
+            }
+
+            int responseContentLength = 0;
+
+            // Read response headers
+            while ((line = serviceIn.readLine()) != null && !line.isEmpty()) {
+                clientOut.print(line + "\r\n");
+                if (line.toLowerCase().startsWith("content-length:")) {
+                    responseContentLength = Integer.parseInt(line.split(":")[1].trim());
+                }
+            }
+            clientOut.print("\r\n");
+            clientOut.flush();
+
+            // Read response body
+            if (responseContentLength > 0) {
+                char[] respBodyChars = new char[responseContentLength];
+                int charsRead = 0;
+
+                while (charsRead < responseContentLength) {
+                    int read = serviceIn.read(respBodyChars, charsRead, responseContentLength - charsRead);
+                    if (read == -1) break;
+                    charsRead += read;
+                }
+                clientOut.print(respBodyChars);
+                clientOut.flush();
+            } else {
+                while ((line = serviceIn.readLine()) != null) {
+                    clientOut.print(line + "\r\n");
+                }
+                clientOut.flush();
+            }
+
         }
         catch (IOException e) {
-            clientOut.println("HTTP/1.1 502 Bad Gateway\r\n\r\nService at port " + port + " is unreachable.");
+            clientOut.print("HTTP/1.1 502 Bad Gateway\r\n\r\nService at port " + port + " is unreachable.");
+            clientOut.flush();
         }
     }
 }
